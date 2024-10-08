@@ -12,6 +12,9 @@ WORKDIR /app
 
 COPY --from=builder /app/label-printer /app/label-printer
 
-RUN pip install brother_ql libusb
+RUN apk update && apk add libusb
+RUN pip install brother_ql
+
+RUN brother_ql
 
 ENTRYPOINT [ "./label-printer" ]
