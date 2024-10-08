@@ -11,6 +11,7 @@ FROM python:3.6-alpine
 WORKDIR /app
 
 COPY --from=builder /app/label-printer /app/label-printer
+COPY cat-62x100.png /app/
 
 RUN apk update
 RUN apk add --no-cache libusb zlib zlib-dev jpeg-dev gcc musl-dev

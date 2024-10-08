@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -24,44 +25,30 @@ func main() {
 
 	fmt.Println("Starting server")
 
-	helloMux := http.NewServeMux()
-	helloMux.HandleFunc("/hello", hello)
+	handlerMux := http.NewServeMux()
 
-	helloSrv := &http.Server{
+	server := &http.Server{
 		Addr:         "127.0.0.1:8080",
 		WriteTimeout: 10 * time.Second,
 		ReadTimeout:  10 * time.Second,
-		Handler:      middleware{helloMux},
+		Handler:      middleware{handlerMux},
 	}
 
-	adminMux := http.NewServeMux()
-	adminMux.HandleFunc("/ping", ping)
-
-	adminSrv := &http.Server{
-		Addr:         "127.0.0.1:8081",
-		WriteTimeout: 10 * time.Second,
-		ReadTimeout:  10 * time.Second,
-		Handler:      middleware{adminMux},
-	}
+	handlerMux.HandleFunc("/hello", hello)
+	handlerMux.HandleFunc("/ping", ping)
+	handlerMux.HandleFunc("/print-cat", printCat)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT)
 
 	go func() {
-		helloSrv.Serve(tunnel)
-	}()
-
-	go func() {
-		adminSrv.Serve(tunnel)
+		server.Serve(tunnel)
 	}()
 
 	defer func() {
-		if err := helloSrv.Shutdown(ctx); err != nil {
+		if err := server.Shutdown(ctx); err != nil {
 			fmt.Println("error when shutting down the main server: ", err)
-		}
-		if err := adminSrv.Shutdown(ctx); err != nil {
-			fmt.Println("error when shutting down the admin server: ", err)
 		}
 	}()
 
@@ -104,6 +91,27 @@ func ping(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func printCat(rw http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodGet:
+		cmd := exec.Command("brother_ql",
+			"-b", "pyusb",
+			"-m", "QL-500",
+			"-p", "usb://0x04f9:0xC15",
+			"print",
+			"-l", "62",
+			"cat-62x100.png")
+
+		output, err := cmd.CombinedOutput()
+
+		if err != nil {
+			fmt.Printf("Command execution failed: %v", err)
+		}
+
+		rw.Write([]byte(string(output)))
+	}
+}
+
 type middleware struct {
 	mux http.Handler
 }
@@ -116,5 +124,5 @@ func (m middleware) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	m.mux.ServeHTTP(rw, req)
 
 	start := req.Context().Value("__requestStartTimer__").(time.Time)
-	fmt.Println("request duration: ", time.Now().Sub(start))
+	fmt.Println("request duration: ", time.Since(start))
 }
