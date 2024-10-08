@@ -6,12 +6,12 @@ COPY main.go go.mod go.sum vendor/ ./
 
 RUN go build -mod=readonly -o /app/label-printer
 
-FROM python:3.6
+FROM python:3.6-alpine
 
 WORKDIR /app
 
 COPY --from=builder /app/label-printer /app/label-printer
 
-RUN pip install brother_ql
+RUN pip install brother_ql libusb
 
 ENTRYPOINT [ "./label-printer" ]
