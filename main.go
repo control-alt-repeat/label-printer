@@ -97,7 +97,7 @@ func printCat(rw http.ResponseWriter, req *http.Request) {
 		cmd := exec.Command("brother_ql",
 			"-b", "pyusb",
 			"-m", "QL-500",
-			"-p", "usb://0x04f9:0xC15",
+			"-p", "usb://0x04f9:0x2015",
 			"print",
 			"-l", "62",
 			"cat-62x100.png")

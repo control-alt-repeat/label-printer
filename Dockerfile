@@ -17,6 +17,5 @@ RUN apk update
 RUN apk add --no-cache libusb-dev zlib zlib-dev jpeg-dev gcc musl-dev
 
 RUN pip install brother_ql pyusb
-RUN brother_ql
 
 ENTRYPOINT [ "./label-printer" ]
