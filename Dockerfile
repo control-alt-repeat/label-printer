@@ -1,4 +1,4 @@
-FROM docker.io/golang:1.23-alpine as builder
+FROM golang:1.23-alpine as builder
 
 WORKDIR /app
 
@@ -12,9 +12,10 @@ WORKDIR /app
 
 COPY --from=builder /app/label-printer /app/label-printer
 
-RUN apk update && apk add libusb
-RUN pip install brother_ql
+RUN apk update
+RUN apk add --no-cache libusb zlib zlib-dev jpeg-dev gcc musl-dev
 
+RUN pip install brother_ql
 RUN brother_ql
 
 ENTRYPOINT [ "./label-printer" ]
