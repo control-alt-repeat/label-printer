@@ -14,9 +14,9 @@ COPY --from=builder /app/label-printer /app/label-printer
 COPY cat-62x100.png /app/
 
 RUN apk update
-RUN apk add --no-cache libusb zlib zlib-dev jpeg-dev gcc musl-dev
+RUN apk add --no-cache libusb-dev zlib zlib-dev jpeg-dev gcc musl-dev
 
-RUN pip install brother_ql
+RUN pip install brother_ql pyusb
 RUN brother_ql
 
 ENTRYPOINT [ "./label-printer" ]
