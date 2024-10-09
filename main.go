@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ssm"
 
 	localtunnel "github.com/localtunnel/go-localtunnel"
 )
@@ -20,7 +21,7 @@ import (
 func main() {
 	fmt.Print("Validating AWS credentials")
 
-	_, err := session.NewSession(&aws.Config{
+	aws_session, err := session.NewSession(&aws.Config{
 		Region: aws.String("eu-west-2")},
 	)
 
@@ -35,6 +36,19 @@ func main() {
 	}
 
 	fmt.Printf("Tunnel URL: %s\n", tunnel.URL())
+
+	input := &ssm.PutParameterInput{
+		Name:  aws.String("/control_alt_repeat/ebay/live/label_printer/host_domain"),
+		Value: aws.String(tunnel.URL()),
+		Type:  aws.String("String"),
+	}
+
+	ssm_svc := ssm.New(aws_session)
+	_, err = ssm_svc.PutParameter(input)
+
+	if err != nil {
+		log.Fatalf("Failed to store tunnel URL in parameter store: %v", err)
+	}
 
 	fmt.Println("Starting server")
 
