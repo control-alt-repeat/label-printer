@@ -11,10 +11,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+
 	localtunnel "github.com/localtunnel/go-localtunnel"
 )
 
 func main() {
+	fmt.Print("Validating AWS credentials")
+
+	_, err := session.NewSession(&aws.Config{
+		Region: aws.String("eu-west-2")},
+	)
+
 	tunnel, err := localtunnel.Listen(localtunnel.Options{})
 
 	if err != nil {
