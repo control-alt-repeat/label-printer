@@ -24,6 +24,10 @@ func main() {
 		Region: aws.String("eu-west-2")},
 	)
 
+	if err != nil {
+		log.Fatalf("Failed to create AWS session: %v", err)
+	}
+
 	tunnel, err := localtunnel.Listen(localtunnel.Options{})
 
 	if err != nil {
