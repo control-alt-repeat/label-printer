@@ -124,20 +124,25 @@ func webhook(rw http.ResponseWriter, req *http.Request) {
 			Bucket: aws.String(bucket),
 		})
 		if err != nil {
-			fmt.Println("Unable to list items in bucket", bucket, err)
+			log.Fatal(err)
 			return
 		}
 
 		for _, item := range result.Contents {
-			fmt.Printf("Downloading %s from bucket %s\n", *item.Key, bucket)
-
 			err := downloadFile(svc, bucket, *item.Key)
 			if err != nil {
-				fmt.Println("Unable to download item:", err)
+				log.Fatal(err)
+				return
 			}
 
 			format_name := strings.SplitN(*item.Key, "-", 2)[0]
+
+			fmt.Println("format_name: ", format_name)
+
 			printer := printerMap[format_name]
+
+			fmt.Println("printer: ", printer.Name)
+			fmt.Println("port: ", printer.Port)
 
 			cmd := exec.Command("brother_ql",
 				"-b", "pyusb",
@@ -147,10 +152,13 @@ func webhook(rw http.ResponseWriter, req *http.Request) {
 				"-l", format_name,
 				*item.Key)
 
+			fmt.Println("Executing command: ", cmd.String())
+
 			output, err := cmd.CombinedOutput()
 
 			if err != nil {
-				fmt.Printf("Command execution failed: %v", err.Error())
+				log.Fatal(err)
+				return
 			} else {
 				deleteFile(svc, bucket, *item.Key)
 			}
@@ -186,7 +194,7 @@ func printCat(rw http.ResponseWriter, req *http.Request) {
 		output, err := cmd.CombinedOutput()
 
 		if err != nil {
-			fmt.Printf("Command execution failed: %v", err)
+			log.Fatal(err)
 		}
 
 		rw.Write([]byte(string(output)))
@@ -209,6 +217,8 @@ func (m middleware) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 }
 
 func downloadFile(svc *s3.S3, bucket, key string) error {
+	fmt.Printf("Downloading %s from bucket %s\n", key, bucket)
+
 	file, err := os.Create(filepath.Base(key))
 	if err != nil {
 		return err
