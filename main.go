@@ -145,9 +145,9 @@ func webhook(rw http.ResponseWriter, req *http.Request) {
 			fmt.Println("port: ", printer.Port)
 
 			cmd := exec.Command("brother_ql",
-				"-b", "pyusb",
-				"-m", printer.Name,
-				"-p", printer.Port,
+				"--backend", "pyusb",
+				"--model", printer.Name,
+				"--printer", printer.Port,
 				"print",
 				"-l", format_name,
 				*item.Key)
@@ -157,9 +157,8 @@ func webhook(rw http.ResponseWriter, req *http.Request) {
 			output, err := cmd.CombinedOutput()
 
 			if err != nil {
-				fmt.Println(output)
-				log.Fatal(err)
-				return
+				fmt.Println(string(output))
+				fmt.Println(string(err.Error()))
 			} else {
 				deleteFile(svc, bucket, *item.Key)
 			}
