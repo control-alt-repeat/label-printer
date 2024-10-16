@@ -34,7 +34,7 @@ var printerMap = map[string]Printer{
 	},
 	"102x152": {
 		Port: "usb://0x04f9:0x202a",
-		Name: "QL-500",
+		Name: "QL-1060N",
 	},
 }
 
@@ -150,7 +150,7 @@ func webhook(rw http.ResponseWriter, req *http.Request) {
 			output, err := cmd.CombinedOutput()
 
 			if err != nil {
-				fmt.Printf("Command execution failed: %v", err)
+				fmt.Printf("Command execution failed: %v", err.Error())
 			} else {
 				deleteFile(svc, bucket, *item.Key)
 			}
