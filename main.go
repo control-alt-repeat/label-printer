@@ -163,7 +163,7 @@ func webhook(rw http.ResponseWriter, req *http.Request) {
 				deleteFile(svc, bucket, *item.Key)
 			}
 
-			fmt.Println(output)
+			fmt.Println(string(output))
 		}
 
 		rw.Write([]byte(""))
