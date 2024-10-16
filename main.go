@@ -157,6 +157,7 @@ func webhook(rw http.ResponseWriter, req *http.Request) {
 			output, err := cmd.CombinedOutput()
 
 			if err != nil {
+				fmt.Println(output)
 				log.Fatal(err)
 				return
 			} else {
