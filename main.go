@@ -75,8 +75,8 @@ func main() {
 
 	server := &http.Server{
 		Addr:         "127.0.0.1:8080",
-		WriteTimeout: 10 * time.Second,
-		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		ReadTimeout:  30 * time.Second,
 		Handler:      middleware{handlerMux},
 	}
 
