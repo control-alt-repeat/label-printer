@@ -108,10 +108,13 @@ func main() {
 }
 
 func print(rw http.ResponseWriter, req *http.Request) {
+	fmt.Println("/print")
 	switch req.Method {
 	case http.MethodPost:
+		fmt.Println("Checking size < 10MB")
 		req.ParseMultipartForm(10 << 20)
 
+		fmt.Println("Retrieving image from form")
 		file, header, err := req.FormFile("image")
 		if err != nil {
 			http.Error(rw, "Error retrieving the file", http.StatusBadRequest)
@@ -120,6 +123,7 @@ func print(rw http.ResponseWriter, req *http.Request) {
 		defer file.Close()
 
 		filePath := filepath.Join("uploads", header.Filename)
+		fmt.Println("Creating file: ", filePath)
 		out, err := os.Create(filePath)
 		if err != nil {
 			http.Error(rw, "Error creating the file", http.StatusInternalServerError)
@@ -133,6 +137,7 @@ func print(rw http.ResponseWriter, req *http.Request) {
 			return
 		}
 
+		fmt.Println("Getting the format")
 		format_name := strings.SplitN(header.Filename, "-", 2)[0]
 
 		fmt.Println("format_name: ", format_name)
