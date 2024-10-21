@@ -83,6 +83,7 @@ func main() {
 	handlerMux.HandleFunc("/webhook", webhook)
 	handlerMux.HandleFunc("/ping", ping)
 	handlerMux.HandleFunc("/print-cat", printCat)
+	handlerMux.HandleFunc("/print", print)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigs := make(chan os.Signal, 1)
@@ -104,6 +105,67 @@ func main() {
 	cancel()
 
 	fmt.Println("service has shutdown")
+}
+
+func print(rw http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodPost:
+		req.ParseMultipartForm(10 << 20)
+
+		file, header, err := req.FormFile("image")
+		if err != nil {
+			http.Error(rw, "Error retrieving the file", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		filePath := filepath.Join("uploads", header.Filename)
+		out, err := os.Create(filePath)
+		if err != nil {
+			http.Error(rw, "Error creating the file", http.StatusInternalServerError)
+			return
+		}
+		defer out.Close()
+
+		_, err = io.Copy(out, file)
+		if err != nil {
+			http.Error(rw, "Error saving the file", http.StatusInternalServerError)
+			return
+		}
+
+		format_name := strings.SplitN(header.Filename, "-", 2)[0]
+
+		fmt.Println("format_name: ", format_name)
+
+		printer := printerMap[format_name]
+
+		fmt.Println("printer: ", printer.Name)
+		fmt.Println("port: ", printer.Port)
+
+		cmd := exec.Command("brother_ql",
+			"--backend", "pyusb",
+			"--model", printer.Name,
+			"--printer", printer.Port,
+			"print",
+			"-l", format_name,
+			header.Filename)
+
+		fmt.Println("Executing command: ", cmd.String())
+
+		_, err = cmd.CombinedOutput()
+		if err != nil {
+			http.Error(rw, "Error executing print operation the file", http.StatusInternalServerError)
+			return
+		}
+
+		err = os.Remove(filePath)
+		if err != nil {
+			http.Error(rw, "Error deleting the file", http.StatusInternalServerError)
+			return
+		}
+
+		fmt.Fprintln(rw, "File uploaded and processed successfully")
+	}
 }
 
 func webhook(rw http.ResponseWriter, req *http.Request) {
