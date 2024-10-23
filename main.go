@@ -3,314 +3,339 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/png"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/ssm"
 
 	localtunnel "github.com/localtunnel/go-localtunnel"
+
+	"github.com/justinas/alice"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/hlog"
+	"github.com/rs/zerolog/pkgerrors"
 )
+
+var log zerolog.Logger
+
+type PrintJob struct {
+	Printer    Printer
+	FormatName string
+	FilePath   string
+}
 
 type Printer struct {
 	Port string
 	Name string
 }
 
-var printerMap = map[string]Printer{
-	"62": {
-		Port: "usb://0x04f9:0x2015",
-		Name: "QL-500",
+type LabelDimensions struct {
+	X int
+	Y int
+}
+
+type LabelFormat struct {
+	Name string
+}
+
+var labelFormats = map[LabelDimensions]LabelFormat{
+	{X: 696, Y: 1109}: {
+		Name: "62x100",
 	},
-	"102x152": {
-		Port: "usb://0x04f9:0x202a",
-		Name: "QL-1060N",
+	{X: 1164, Y: 1660}: {
+		Name: "102x152",
 	},
 }
 
-func main() {
-	aws_session, err := session.NewSession(&aws.Config{
-		Region: aws.String("eu-west-2")},
-	)
+// https://github.com/pklaus/brother_ql/blob/56cf4394ad750346c6b664821ccd7489ec140dae/brother_ql/labels.py#L91
+var labelPrinters = map[LabelFormat]Printer{
+	{Name: "62x100"}: {
+		Name: "QL-500",
+		Port: "usb://0x04f9:0x2015",
+	},
+	{Name: "102x152"}: {
+		Name: "QL-1060N",
+		Port: "usb://0x04f9:0x202a",
+	},
+}
 
+const (
+	ServiceName            = "label-printer"
+	UploadDirectory        = "uploads"
+	Region                 = "eu-west-2"
+	TunnelURLParameterName = "/control_alt_repeat/ebay/live/label_printer/host_domain"
+)
+
+func main() {
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack
+
+	consoleWriter := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339}
+
+	log = zerolog.New(consoleWriter).
+		With().
+		Timestamp().
+		Str("service", ServiceName).
+		Logger().
+		Level(zerolog.DebugLevel)
+
+	if err := createUploadDirectory(); err != nil {
+		log.Fatal().Err(err).Msgf("Cannot start %s", ServiceName)
+	}
+
+	aws_session, err := setupAwsSession()
 	if err != nil {
-		log.Fatalf("Failed to create AWS session: %v", err)
+		log.Fatal().Err(err).Msgf("Cannot start %s", ServiceName)
 	}
 
 	tunnel, err := localtunnel.Listen(localtunnel.Options{})
-
 	if err != nil {
-		log.Fatalf("Failed to create tunnel: %v", err)
+		log.Fatal().Err(err).Msgf("Cannot start %s", ServiceName)
+	}
+	log.Info().Msgf("Tunnel opened at '%s'", tunnel.URL())
+
+	if err = saveTunnelUrlInParameterStore(aws_session, tunnel.URL()); err != nil {
+		log.Fatal().Err(err).Msgf("Cannot start %s", ServiceName)
 	}
 
-	fmt.Printf("Tunnel URL: %s\n", tunnel.URL())
+	c := alice.New().
+		Append(hlog.NewHandler(log)).
+		Append(hlog.AccessHandler(func(r *http.Request, status, size int, duration time.Duration) {
+			hlog.FromRequest(r).Info().
+				Str("method", r.Method).
+				Stringer("url", r.URL).
+				Int("status", status).
+				Int("size", size).
+				Dur("duration", duration).
+				Msg("")
+		})).
+		Append(hlog.RemoteAddrHandler("ip")).
+		Append(hlog.UserAgentHandler("user_agent")).
+		Append(hlog.RefererHandler("referer")).
+		Append(hlog.RequestIDHandler("req_id", "Request-Id"))
 
-	input := &ssm.PutParameterInput{
-		Name:      aws.String("/control_alt_repeat/ebay/live/label_printer/host_domain"),
-		Value:     aws.String(tunnel.URL()),
-		Type:      aws.String("String"),
-		Overwrite: aws.Bool(true),
-	}
-
-	ssm_svc := ssm.New(aws_session)
-	_, err = ssm_svc.PutParameter(input)
-
-	if err != nil {
-		log.Fatalf("Failed to store tunnel URL in parameter store: %v", err)
-	}
-
-	fmt.Println("Starting server")
-
-	handlerMux := http.NewServeMux()
+	pingHandler := c.Then(http.HandlerFunc(ping))
+	printHandler := c.Then(http.HandlerFunc(print))
 
 	server := &http.Server{
 		Addr:         "127.0.0.1:8080",
 		WriteTimeout: 30 * time.Second,
 		ReadTimeout:  30 * time.Second,
-		Handler:      middleware{handlerMux},
 	}
 
-	handlerMux.HandleFunc("/webhook", webhook)
-	handlerMux.HandleFunc("/ping", ping)
-	handlerMux.HandleFunc("/print-cat", printCat)
-	handlerMux.HandleFunc("/print", print)
+	http.Handle("/ping", pingHandler)
+	http.Handle("/print", printHandler)
 
-	ctx, cancel := context.WithCancel(context.Background())
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT)
 
 	go func() {
-		server.Serve(tunnel)
-	}()
-
-	defer func() {
-		if err := server.Shutdown(ctx); err != nil {
-			fmt.Println("error when shutting down the main server: ", err)
+		log.Info().Msg("Starting HTTP server")
+		if err := server.Serve(tunnel); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("Server startup failed")
 		}
 	}()
 
 	sig := <-sigs
 	fmt.Println(sig)
 
-	cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	fmt.Println("service has shutdown")
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatal().Err(err).Msgf("error when shutting down the main server %s", ServiceName)
+	}
+
+	log.Info().Msgf("%s service has shutdown", "my-service")
+}
+
+func saveTunnelUrlInParameterStore(aws_session *session.Session, tunnelURL string) error {
+	log.Debug().
+		Str("tunnelUrlParameterName", TunnelURLParameterName).
+		Str("tunnelURL", tunnelURL).
+		Msg("saveTunnelUrlInParameterStore")
+
+	_, err := ssm.New(aws_session).PutParameter(&ssm.PutParameterInput{
+		Name:      aws.String(TunnelURLParameterName),
+		Value:     aws.String(tunnelURL),
+		Type:      aws.String("String"),
+		Overwrite: aws.Bool(true),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to save tunnel URL in AWS Parameter Store: %v", err.Error())
+	}
+	return err
+}
+
+func setupAwsSession() (*session.Session, error) {
+	log.Debug().Msg("setupAwsSession")
+	aws_session, err := session.NewSession(&aws.Config{Region: aws.String(Region)})
+	if err != nil {
+		return aws_session, fmt.Errorf("could not create AWS session: %v", err.Error())
+	}
+	return aws_session, err
+}
+
+func createUploadDirectory() error {
+	err := os.MkdirAll(UploadDirectory, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("failed to create upload directory: %v", err.Error())
+	}
+	return nil
+}
+
+func (j PrintJob) print() error {
+	cmd := exec.Command("brother_ql",
+		"--backend", "pyusb",
+		"--model", j.Printer.Name,
+		"--printer", j.Printer.Port,
+		"print",
+		"-l", j.FormatName,
+		j.FilePath)
+
+	_, err := cmd.CombinedOutput()
+
+	return err
 }
 
 func print(rw http.ResponseWriter, req *http.Request) {
-	fmt.Println("/print")
 	switch req.Method {
 	case http.MethodPost:
-		fmt.Println("Checking size < 10MB")
-		req.ParseMultipartForm(10 << 20)
+		var labelImage LabelImage
 
-		fmt.Println("Retrieving image from form")
-		file, header, err := req.FormFile("image")
-		if err != nil {
-			http.Error(rw, "Error retrieving the file", http.StatusBadRequest)
-			return
-		}
-		defer file.Close()
-
-		filePath := filepath.Join("uploads", header.Filename)
-		fmt.Println("Creating file: ", filePath)
-		out, err := os.Create(filePath)
-		if err != nil {
-			http.Error(rw, "Error creating the file", http.StatusInternalServerError)
-			return
-		}
-		defer out.Close()
-
-		_, err = io.Copy(out, file)
-		if err != nil {
-			http.Error(rw, "Error saving the file", http.StatusInternalServerError)
+		hlog.FromRequest(req).Debug().Msgf("Getting the label file from form")
+		if err := labelImage.retrieveImageFromForm(rw, req); err != nil {
+			hlog.FromRequest(req).Error().Err(err).Msg("")
 			return
 		}
 
-		fmt.Println("Getting the format")
-		format_name := strings.SplitN(header.Filename, "-", 2)[0]
-
-		fmt.Println("format_name: ", format_name)
-
-		printer := printerMap[format_name]
-
-		fmt.Println("printer: ", printer.Name)
-		fmt.Println("port: ", printer.Port)
-
-		cmd := exec.Command("brother_ql",
-			"--backend", "pyusb",
-			"--model", printer.Name,
-			"--printer", printer.Port,
-			"print",
-			"-l", format_name,
-			header.Filename)
-
-		fmt.Println("Executing command: ", cmd.String())
-
-		_, err = cmd.CombinedOutput()
-		if err != nil {
-			http.Error(rw, "Error executing print operation the file", http.StatusInternalServerError)
+		if err := labelImage.getPNGDimensions(rw); err != nil {
+			hlog.FromRequest(req).Error().Err(err).Msg("")
 			return
 		}
 
-		err = os.Remove(filePath)
-		if err != nil {
-			http.Error(rw, "Error deleting the file", http.StatusInternalServerError)
+		hlog.FromRequest(req).Info().
+			Int("X", labelImage.Dimensions.X).
+			Int("Y", labelImage.Dimensions.Y).
+			Msg("Dimensions")
+
+		format, exists := labelFormats[labelImage.Dimensions]
+		if !exists {
+			err := fmt.Errorf("dimensions %v is not valid, must match map %v", labelImage.Dimensions, labelFormats)
+			http.Error(rw, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		fmt.Fprintln(rw, "File uploaded and processed successfully")
-	}
-}
+		printJob := &PrintJob{
+			Printer:    labelPrinters[format],
+			FormatName: format.Name,
+			FilePath:   labelImage.File.Name(),
+		}
 
-func webhook(rw http.ResponseWriter, req *http.Request) {
-	switch req.Method {
-	case http.MethodPost:
-		aws_session, err := session.NewSession(&aws.Config{
-			Region: aws.String("eu-west-2")},
-		)
-		if err != nil {
-			fmt.Println("Failed to create new session", err)
+		hlog.FromRequest(req).Info().
+			Str("PrinterName", printJob.Printer.Name).
+			Str("PrinterPort", printJob.Printer.Port).
+			Str("FormatName", printJob.FormatName).
+			Str("FilePath", printJob.FilePath).
+			Msg("Printing job")
+
+		if err := printJob.print(); err != nil {
+			hlog.FromRequest(req).Error().Err(err).Msg("")
+			http.Error(rw, "something went wrong printing the label", http.StatusInternalServerError)
 			return
 		}
 
-		svc := s3.New(aws_session)
-		bucket := "control-alt-repeat-label-print-buffer"
-
-		result, err := svc.ListObjectsV2(&s3.ListObjectsV2Input{
-			Bucket: aws.String(bucket),
-		})
+		err := os.Remove(labelImage.File.Name())
 		if err != nil {
-			log.Fatal(err)
-			return
+			hlog.FromRequest(req).Error().Err(err).Msg("could not delete the image after processing")
 		}
-
-		for _, item := range result.Contents {
-			err := downloadFile(svc, bucket, *item.Key)
-			if err != nil {
-				log.Fatal(err)
-				return
-			}
-
-			format_name := strings.SplitN(*item.Key, "-", 2)[0]
-
-			fmt.Println("format_name: ", format_name)
-
-			printer := printerMap[format_name]
-
-			fmt.Println("printer: ", printer.Name)
-			fmt.Println("port: ", printer.Port)
-
-			cmd := exec.Command("brother_ql",
-				"--backend", "pyusb",
-				"--model", printer.Name,
-				"--printer", printer.Port,
-				"print",
-				"-l", format_name,
-				*item.Key)
-
-			fmt.Println("Executing command: ", cmd.String())
-
-			output, err := cmd.CombinedOutput()
-
-			if err != nil {
-				fmt.Println(string(output))
-				fmt.Println(string(err.Error()))
-			} else {
-				deleteFile(svc, bucket, *item.Key)
-			}
-
-			fmt.Println(string(output))
-		}
-
-		rw.Write([]byte(""))
 	}
 }
 
 func ping(rw http.ResponseWriter, req *http.Request) {
+	hlog.FromRequest(req).Info().Msg("ping")
 	switch req.Method {
 	case http.MethodGet:
 		if _, err := rw.Write([]byte("pong\n")); err != nil {
-			fmt.Println("error when writing response for /ping request")
+			hlog.FromRequest(req).Debug().Msgf("error when writing response for /ping request")
 			rw.WriteHeader(http.StatusInternalServerError)
 		}
 	}
 }
 
-func printCat(rw http.ResponseWriter, req *http.Request) {
-	switch req.Method {
-	case http.MethodGet:
-		cmd := exec.Command("brother_ql",
-			"-b", "pyusb",
-			"-m", "QL-500",
-			"-p", "usb://0x04f9:0x2015",
-			"print",
-			"-l", "62",
-			"cat-62x100.png")
-
-		output, err := cmd.CombinedOutput()
-
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		rw.Write([]byte(string(output)))
+func (l *LabelImage) retrieveImageFromForm(rw http.ResponseWriter, req *http.Request) error {
+	hlog.FromRequest(req).Debug().Msgf("Checking size < 10MB")
+	if err := req.ParseMultipartForm(10 << 20); err != nil {
+		err = fmt.Errorf("upload should be fewer than 10MB: %w", err)
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return err
 	}
-}
 
-type middleware struct {
-	mux http.Handler
-}
-
-func (m middleware) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	ctx := context.WithValue(req.Context(), "user", "unknown")
-	ctx = context.WithValue(ctx, "__requestStartTimer__", time.Now())
-	req = req.WithContext(ctx)
-
-	m.mux.ServeHTTP(rw, req)
-
-	start := req.Context().Value("__requestStartTimer__").(time.Time)
-	fmt.Println("request duration: ", time.Since(start))
-}
-
-func downloadFile(svc *s3.S3, bucket, key string) error {
-	fmt.Printf("Downloading %s from bucket %s\n", key, bucket)
-
-	file, err := os.Create(filepath.Base(key))
+	hlog.FromRequest(req).Debug().Msgf("Retrieving image from form")
+	file, header, err := req.FormFile("image")
 	if err != nil {
+		err = fmt.Errorf("form file not found at key 'image': %w", err)
+		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return err
 	}
 	defer file.Close()
 
-	result, err := svc.GetObject(&s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-
+	filePath := filepath.Join(UploadDirectory, header.Filename)
+	out, err := os.Create(filePath)
 	if err != nil {
+		err = fmt.Errorf("unable to create file for copying the form image: %w", err)
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return err
+	}
+	defer out.Close()
+
+	hlog.FromRequest(req).Debug().Msgf("copying file: %s", out.Name())
+	_, err = io.Copy(out, file)
+	if err != nil {
+		err = fmt.Errorf("unable to copy form content to file: %w", err)
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return err
 	}
 
-	_, err = io.Copy(file, result.Body)
+	l.File = out
 
-	return err
+	return nil
 }
 
-func deleteFile(svc *s3.S3, bucket, key string) error {
-	_, err := svc.DeleteObject(&s3.DeleteObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
+type LabelImage struct {
+	File       *os.File
+	Dimensions LabelDimensions
+}
 
-	return err
+func (l *LabelImage) getPNGDimensions(rw http.ResponseWriter) error {
+	file, err := os.Open(l.File.Name())
+	if err != nil {
+		err = fmt.Errorf("could not get image from file: %w", err)
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return err
+	}
+	defer file.Close()
+
+	img, err := png.Decode(file)
+	if err != nil {
+		err = fmt.Errorf("could not decode file to PNG: %w", err)
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return err
+	}
+
+	bounds := img.Bounds()
+	l.Dimensions.X = bounds.Dx()
+	l.Dimensions.Y = bounds.Dy()
+
+	return nil
 }
