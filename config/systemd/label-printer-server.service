@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the label-printer-server container with Podman
+After=network.target
+
+[Service]
+Restart=always
+ExecStartPre=-/usr/bin/podman rm -f label-printer-server
+ExecStartPre=/usr/bin/podman pull ghcr.io/control-alt-repeat/label-printer/server:latest
+ExecStart=/usr/bin/podman run --name label-printer-server -d ghcr.io/control-alt-repeat/label-printer/server:latest
+ExecStop=/usr/bin/podman stop label-printer-server
+ExecStopPost=/usr/bin/podman rm -f label-printer-server
+
+[Install]
+WantedBy=multi-user.target
