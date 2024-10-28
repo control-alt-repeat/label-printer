@@ -1,13 +1,13 @@
 [Unit]
-Description=Run the label-printer-server container with Podman
+Description=Run the label-printer-server container with podman-compose
 After=network.target
 
 [Service]
 Restart=always
-ExecStartPre=/usr/bin/podman rm -f label-printer-server
-ExecStartPre=/usr/bin/podman pull ghcr.io/control-alt-repeat/label-printer/server:latest
-ExecStart=/usr/bin/podman run --volume ~/.aws:/root/.aws --privileged --device=/dev/bus/usb:/dev/bus/usb --name label-printer-server -d ghcr.io/control-alt-repeat/label-printer/server:latest
-ExecStop=/usr/bin/podman stop label-printer-server
+EnvironmentFile=/etc/default/aws-env
+WorkingDirectory=/home/control-alt-repeat/label-printer
+ExecStart=/usr/local/bin/podman-compose up -d
+ExecStop=/usr/local/bin/podman-compose down
 ExecStopPost=/usr/bin/podman rm -f label-printer-server
 
 [Install]

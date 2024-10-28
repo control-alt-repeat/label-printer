@@ -1,0 +1,12 @@
+services:
+  label-printer:
+    image: ghcr.io/control-alt-repeat/label-printer/server:latest
+    privileged: true
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_DEFAULT_REGION
+      - AWS_REGION
+    restart: always
