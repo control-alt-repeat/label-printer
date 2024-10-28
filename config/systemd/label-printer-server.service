@@ -3,7 +3,6 @@ Description=Run the label-printer-server container with podman-compose
 After=network.target
 
 [Service]
-Restart=always
 EnvironmentFile=/etc/default/aws-env
 WorkingDirectory=/home/control-alt-repeat/label-printer
 ExecStart=/usr/bin/podman-compose up -d
