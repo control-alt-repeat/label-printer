@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"image/png"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -126,6 +128,7 @@ func main() {
 
 	pingHandler := c.Then(http.HandlerFunc(ping))
 	printHandler := c.Then(http.HandlerFunc(print))
+	printerHandler := c.Then(http.HandlerFunc(printer))
 
 	server := &http.Server{
 		Addr:         "127.0.0.1:8080",
@@ -135,6 +138,7 @@ func main() {
 
 	http.Handle("/ping", pingHandler)
 	http.Handle("/print", printHandler)
+	http.Handle("/printer", printerHandler)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT)
@@ -194,7 +198,7 @@ func createUploadDirectory() error {
 	return nil
 }
 
-func (j PrintJob) print() error {
+func (j PrintJob) print(logger zerolog.Logger) error {
 	cmd := exec.Command("brother_ql",
 		"--backend", "pyusb",
 		"--model", j.Printer.Name,
@@ -203,9 +207,34 @@ func (j PrintJob) print() error {
 		"-l", j.FormatName,
 		j.FilePath)
 
-	_, err := cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
+
+	logger.Debug().Msg(string(output))
+
+	if err != nil {
+		logger.Err(err).Msg("")
+	}
 
 	return err
+}
+
+func printerActive(logger zerolog.Logger, port string) (bool, error) {
+	cmd := exec.Command("brother_ql",
+		"--backend", "pyusb",
+		"discover")
+
+	output, err := cmd.CombinedOutput()
+
+	logger.Debug().Msg(string(output))
+	if err != nil {
+		logger.Err(err).Msg("")
+	}
+
+	active := strings.ContainsAny(string(output), port)
+
+	logger.Debug().Msgf("Printer active: %T", active)
+
+	return active, err
 }
 
 func print(rw http.ResponseWriter, req *http.Request) {
@@ -249,7 +278,7 @@ func print(rw http.ResponseWriter, req *http.Request) {
 			Str("FilePath", printJob.FilePath).
 			Msg("Printing job")
 
-		if err := printJob.print(); err != nil {
+		if err := printJob.print(hlog.FromRequest(req).With().Logger()); err != nil {
 			hlog.FromRequest(req).Error().Err(err).Msg("")
 			http.Error(rw, "something went wrong printing the label", http.StatusInternalServerError)
 			return
@@ -258,6 +287,84 @@ func print(rw http.ResponseWriter, req *http.Request) {
 		err := os.Remove(labelImage.File.Name())
 		if err != nil {
 			hlog.FromRequest(req).Error().Err(err).Msg("could not delete the image after processing")
+		}
+	}
+}
+
+type PrinterResponse struct {
+	Model  string `json:"model"`
+	Active bool   `json:"active"`
+	Label  string `json:"label"`
+}
+
+func printer(rw http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodGet:
+		labelQueryParameterName := "label"
+
+		if !req.URL.Query().Has(labelQueryParameterName) {
+			hlog.FromRequest(req).Info().Msgf("Request must include 'label' query parameter")
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		requestedLabel := req.URL.Query().Get(labelQueryParameterName)
+
+		response := &PrinterResponse{
+			Active: false,
+			Label:  requestedLabel,
+		}
+
+		var printer Printer
+
+		for _, format := range labelFormats {
+			if format.Name != requestedLabel {
+				continue
+			}
+
+			printer = labelPrinters[format]
+			break
+		}
+
+		hlog.FromRequest(req).Debug().
+			Str("Model", printer.Name).
+			Str("Label", printer.Port).
+			Msgf("Printer")
+
+		response.Model = printer.Name
+
+		if response.Model == "" {
+			hlog.FromRequest(req).Info().Msgf("Model for label '%s' not found", requestedLabel)
+			rw.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		active, err := printerActive(hlog.FromRequest(req).With().Logger(), printer.Port)
+		if err != nil {
+			hlog.FromRequest(req).Err(err).Msgf("")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		response.Active = active
+
+		hlog.FromRequest(req).Debug().
+			Str("Model", response.Model).
+			Str("Label", response.Label).
+			Bool("Active", response.Active).
+			Msgf("Response object")
+
+		responseBytes, err := json.Marshal(response)
+		if err != nil {
+			hlog.FromRequest(req).Err(err).Msgf("")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		if _, err := rw.Write(responseBytes); err != nil {
+			hlog.FromRequest(req).Err(err).Msgf("")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 	}
 }
