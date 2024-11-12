@@ -1,5 +1,4 @@
 #!/bin/bash
-sudo cp config/systemd/label-printer-server.service /etc/systemd/system/
+sudo cp config/systemd/label-printer-server.container /etc/containers/systemd/
 sudo systemctl daemon-reload
-sudo systemctl enable label-printer-server.service
-sudo systemctl start label-printer-server.service
+sudo systemctl enable --now label-printer-server.service
