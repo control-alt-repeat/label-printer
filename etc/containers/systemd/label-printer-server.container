@@ -1,0 +1,16 @@
+[Unit]
+Description=Label Printer Server
+
+[Container]
+Image=ghcr.io/control-alt-repeat/label-printer/server:latest
+
+Volume=/home/control-alt-repeat/.aws:/root/.aws:ro
+Volume=/dev:/dev:slave
+
+PodmanArgs=--privileged
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target default.target
